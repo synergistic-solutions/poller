@@ -48,7 +48,7 @@ class Poll:
         :return: None
         """
         if not hasattr(server_conn, 'on_connect'):
-            raise EventNotImplementedError("on_event method has not been implemented")
+            raise EventNotImplementedError("on_connect method has not been implemented")
         if server_fd is None:
             server_fd = server_conn.fileno()
 
@@ -132,6 +132,31 @@ class Poll:
                 client_conn.close()
                 print("Error while handling a client event from", client_fd, ":", e)
 
+    def serve_once(self, worker_id: int=0):
+        """
+        iterates through all the jobs that need doing and executing them
+        :param worker_id: id of worker it is acting as
+        :return: None
+        """
+        if not worker_id:
+            events = self.poll.poll()
+            self.events = [events[i::self.worker_count] for i in range(self.worker_count)]
+
+        for fd, event in self.events[worker_id]:
+            if fd in self.clients:
+                self.client_event(fd)
+            elif fd in self.servers:
+                self.server_event(fd)
+            else:
+                print("Error could not find ", fd, "doing", event, "on worker", worker_id)
+
+        if not worker_id:
+            for fd, conn in {**self.clients, **self.servers}.items():
+                if conn.is_closed():
+                    if hasattr(conn, 'on_disconnect'):
+                        conn.on_disconnect()
+                    self.remove(conn, fd)
+
     def worker(self, worker_id: int=0):
         """
         create a worker (blocking) that iterates through jobs that need doing and executing them
@@ -139,24 +164,7 @@ class Poll:
         :return: None
         """
         while self.open:
-            if not worker_id:
-                events = self.poll.poll()
-                self.events = [events[i::self.worker_count] for i in range(self.worker_count)]
-
-            for fd, event in self.events[worker_id]:
-                if fd in self.clients:
-                    self.client_event(fd)
-                elif fd in self.servers:
-                    self.server_event(fd)
-                else:
-                    print("Error could not find ", fd, "doing", event, "on worker", worker_id)
-
-            if not worker_id:
-                for fd, conn in {**self.clients, **self.servers}.items():
-                    if conn.is_closed():
-                        if hasattr(conn, 'on_disconnect'):
-                            conn.on_disconnect()
-                        self.remove(conn, fd)
+            self.serve_once(worker_id)
 
     def set_worker_count(self, worker_count: int=1):
         """
