@@ -20,10 +20,10 @@ class NotAnError(Exception):
 
 class Poll:
 
-    def __init__(self, poll: typing.Type[select.epoll]=None, catch_errors: bool=True):
+    def __init__(self, poll: typing.Type[select.poll]=None, catch_errors: bool=True):
         """
         create new poller
-        :param poll: existing epoll object
+        :param poll: existing poll object
         :param catch_errors: should all exceptions be caught
         """
         if poll is None:
@@ -53,7 +53,7 @@ class Poll:
             server_fd = server_conn.fileno()
 
         self.servers[server_fd] = server_conn
-        self.poll.register(server_fd, select.EPOLLIN)
+        self.poll.register(server_fd, select.POLLIN)
 
     def add_client(self, client_conn: typing.Type[socket.socket], client_fd: int=None):
         """
@@ -62,14 +62,17 @@ class Poll:
         :param client_fd: socket's file descriptor
         :return: None
         """
-        if not hasattr(client_conn, 'on_message'):
-            raise EventNotImplementedError("on_message method has not been implemented")
+        if not hasattr(client_conn, 'on_receive'):
+            raise EventNotImplementedError("on_receive method has not been implemented")
+        #if not hasattr(client_conn, 'on_send'):
+        #    raise EventNotImplementedError("on_send method has not been implemented")
         if client_fd is None:
             client_fd = client_conn.fileno()
         if hasattr(client_conn, 'on_connect'):
             client_conn.on_connect()
         self.clients[client_fd] = client_conn
-        self.poll.register(client_fd, select.EPOLLIN)
+        self.poll.register(client_fd, select.POLLIN)
+        # self.poll.register(client_fd, select.POLLOUT)
 
     def remove(self, conn: typing.Type[socket.socket]=None, fd: int=None):
         """
@@ -94,7 +97,7 @@ class Poll:
             if fd in self.servers:
                 del self.servers[fd]
 
-    def server_event(self, server_fd: int=None, server_conn: typing.Type[socket.socket]=None):
+    def server_connect_event(self, server_fd: int=None, server_conn: typing.Type[socket.socket]=None):
         """
         handle an event for a server object
         :param server_fd: file descriptor of the server
@@ -113,7 +116,7 @@ class Poll:
         except self.catch as e:
             print("Error while handling a server event for", server_fd, ":", e)
 
-    def client_event(self, client_fd: int=None, client_conn: typing.Type[socket.socket]=None):
+    def client_receive_event(self, client_fd: int=None, client_conn: typing.Type[socket.socket]=None):
         """
         handle an event for a client object
         :param client_fd: file descriptor of the client
@@ -125,9 +128,28 @@ class Poll:
                 raise AttributeError
             client_conn = self.clients[client_fd]
 
-        if hasattr(client_conn, 'on_message'):
+        if hasattr(client_conn, 'on_receive'):
             try:
-                client_conn.on_message()
+                client_conn.on_receive()
+            except self.catch as e:
+                client_conn.close()
+                print("Error while handling a client event from", client_fd, ":", e)
+
+    def client_send_event(self, client_fd: int=None, client_conn: typing.Type[socket.socket]=None):
+        """
+        handle an event for a client object
+        :param client_fd: file descriptor of the client
+        :param client_conn: socket object of the client
+        :return:
+        """
+        if not client_conn:
+            if client_fd is None:
+                raise AttributeError
+            client_conn = self.clients[client_fd]
+
+        if hasattr(client_conn, 'on_send'):
+            try:
+                client_conn.on_send()
             except self.catch as e:
                 client_conn.close()
                 print("Error while handling a client event from", client_fd, ":", e)
@@ -143,16 +165,17 @@ class Poll:
             self.events = [events[i::self.worker_count] for i in range(self.worker_count)]
 
         for fd, event in self.events[worker_id]:
-            if fd in self.clients:
-                self.client_event(fd)
-            elif fd in self.servers:
-                self.server_event(fd)
-            else:
-                print("Error could not find ", fd, "doing", event, "on worker", worker_id)
+            if event == select.POLLIN:
+                if fd in self.clients:
+                    self.client_receive_event(fd)
+                elif fd in self.servers:
+                    self.server_connect_event(fd)
+                else:
+                    print("Error could not find ", fd, "doing", event, "on worker", worker_id)
 
         if not worker_id:
             for fd, conn in {**self.clients, **self.servers}.items():
-                if conn.is_closed():
+                if conn._closed:
                     if hasattr(conn, 'on_disconnect'):
                         conn.on_disconnect()
                     self.remove(conn, fd)
