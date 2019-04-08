@@ -1,3 +1,4 @@
+import sys
 import select
 import socket
 import typing
@@ -20,21 +21,31 @@ class NotAnError(Exception):
 
 class Poll:
 
-    def __init__(self, poll: typing.Type[select.poll]=None, catch_errors: bool=True):
+    def __init__(self, poll=None, catch_errors: bool=True):
         """
         create new poller
         :param poll: existing poll object
         :param catch_errors: should all exceptions be caught
         """
         if poll is None:
-            poll = select.poll()
+            if sys.platform == 'win32':
+                poll = select.select()
+            else:
+                poll = select.epoll()
+        if isinstance(poll, select.epoll):
+            self.object = 'epoll'
+        elif isinstance(poll, select.poll):
+            self.object = 'poll'
+        elif isinstance(poll, select.select):
+            self.object = 'select'
+
         self.poll = poll
         self.open = True
         self.workers = []
         self.servers = {}
         self.clients = {}
         self.events = []
-        self.worker_count = 2
+        self.worker_count = 1
         self.catch = NotAnError
         if catch_errors:
             self.catch = Exception
@@ -53,7 +64,7 @@ class Poll:
             server_fd = server_conn.fileno()
 
         self.servers[server_fd] = server_conn
-        self.poll.register(server_fd, select.POLLIN)
+        self._add(server_conn)
 
     def add_client(self, client_conn: typing.Type[socket.socket], client_fd: int=None):
         """
@@ -71,8 +82,15 @@ class Poll:
         if hasattr(client_conn, 'on_connect'):
             client_conn.on_connect()
         self.clients[client_fd] = client_conn
-        self.poll.register(client_fd, select.POLLIN)
-        # self.poll.register(client_fd, select.POLLOUT)
+        self._add(client_conn)
+
+    def _add(self, conn):
+        if self.object == 'epoll' or self.object == 'poll':
+            # select.POLLIN == select.EPOLLIN
+            self.poll.register(conn.fileno(), select.POLLIN)
+        elif self.object == 'select':
+            new_list = list(self.servers.values()) + list(self.clients.values())
+            self.poll = select.select(new_list, [], [])
 
     def remove(self, conn: typing.Type[socket.socket]=None, fd: int=None):
         """
@@ -86,16 +104,20 @@ class Poll:
         if fd is None:
             fd = conn.fileno()
 
-        try:
-            self.poll.unregister(fd)
-        except KeyError:
-            pass
-
         if fd in self.clients:
             del self.clients[fd]
         else:
             if fd in self.servers:
                 del self.servers[fd]
+
+        if self.object == 'epoll' or self.object == 'poll':
+            try:
+                self.poll.unregister(fd)
+            except KeyError:
+                pass
+        elif self.object == 'select':
+            new_list = list(self.servers.values()) + list(self.clients.values())
+            self.poll = select.select(new_list, [], [])
 
     def server_connect_event(self, server_fd: int=None, server_conn: typing.Type[socket.socket]=None):
         """
